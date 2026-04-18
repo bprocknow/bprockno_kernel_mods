@@ -6,3 +6,5 @@
 *.codex
 *.cmd
 *.mod.c
+*.o.d
+kernel-source*

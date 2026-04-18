@@ -1,39 +1,76 @@
 
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 #include <linux/netdevice.h>
+
 #include "brview.h"
 #include "br_private.h"
 
+static LIST_HEAD(brview_bridge_list);
+static DEFINE_MUTEX(brview_bridge_lock);
 
-/*
- * Add entries in sysfs onto the existing network class device
- * for the bridge.
- */
-int brview_sysfs_addbr(struct net_device *dev)
+struct kobject *brview_root_kobj;
+EXPORT_SYMBOL_GPL(brview_root_kobj);
+
+
+static int brview_create(struct net_device *dev)
 {
-	struct kobject *brobj = &dev->dev.kobj;
-	struct net_bridge *br = netdev_priv(dev);
+	struct brview_bridge *brvb;
+	struct net_bridge_port *p;
 	int err;
 
-	br->ifobj = kobject_create_and_add(SYSFS_BRVIEW_PORT_SUBDIR, brobj);
-	if (!br->ifobj) {
-		pr_info("%s: can't add kobject (directory) %s/%s\n",
-			__func__, dev->name, SYSFS_BRVIEW_PORT_SUBDIR);
-		err = -ENOMEM;
-		goto out;
-	}
-	return 0;
- out:
-	return err;
+	mutex_lock(&brview_bridge_lock);
 
+	brvb = kzalloc(sizeof(*brvb), GFP_KERNEL);
+	if (!brvb) {
+		mutex_unlock(&brview_bridge_lock);
+		err = -ENOMEM;
+		goto out1;
+	}
+
+	p = br_port_get_rtnl(dev);
+	if (!p) {
+		err = -EINVAL;
+		goto out1;
+	}
+
+	// TODO - Initialize brview_bridge brvb
+	brvb->dev = dev;
+	snprintf(brvb->ifname, sizeof(brvb->ifname), "brview_%s", p->sysfs_name);
+	err = brview_sysfs_addbr(brvb);
+	if (err) {
+		goto out2;
+	}
+
+	list_add(&brvb->next, &brview_bridge_list);
+	mutex_unlock(&brview_bridge_lock);
+
+	return 0;
+
+out2:
+	kfree(brvb);
+out1:
+	return err;
 }
 
-void brview_sysfs_delbr(struct net_device *dev)
+static void brview_release(struct net_device *dev)
 {
-	struct net_bridge *br = netdev_priv(dev);
+	struct brview_bridge *brvb, *tmp;
 
-	kobject_put(br->ifobj);
+	mutex_lock(&brview_bridge_lock);
+
+	list_for_each_entry(tmp, &brview_bridge_list, next) {
+
+		if ((void *)(&tmp->dev) == (void *)dev) {
+			kfree(brvb);
+			mutex_unlock(&brview_bridge_lock);
+			return;
+		}
+	}
+
+	mutex_unlock(&brview_bridge_lock);
+	WARN_ONCE(1, "brview does not exist in list\n");
 }
 
 static int brview_device_event(struct notifier_block *unused, unsigned long event, void *ptr)
@@ -46,7 +83,7 @@ static int brview_device_event(struct notifier_block *unused, unsigned long even
 	if (netif_is_bridge_master(dev)) {
 		if (event == NETDEV_REGISTER) {
 			/* register of bridge completed, add sysfs entries */
-			err = brview_sysfs_addbr(dev);
+			err = brview_create(dev);
 			if (err)
 				return notifier_from_errno(err);
 
@@ -66,14 +103,9 @@ static int brview_device_event(struct notifier_block *unused, unsigned long even
 		break;
 
 	case NETDEV_PRE_CHANGEADDR:
-		if (br->dev->addr_assign_type == NET_ADDR_SET)
-			break;
 		break;
 
 	case NETDEV_CHANGEADDR:
-		spin_lock_bh(&br->lock);
-		spin_unlock_bh(&br->lock);
-
 		break;
 
 	case NETDEV_CHANGE:
@@ -83,15 +115,13 @@ static int brview_device_event(struct notifier_block *unused, unsigned long even
 		break;
 
 	case NETDEV_DOWN:
-		spin_lock_bh(&br->lock);
-		spin_unlock_bh(&br->lock);
 		break;
 
 	case NETDEV_UP:
 		break;
 
 	case NETDEV_UNREGISTER:
-		//br_del_if(br, dev);
+		brview_release(dev);
 		break;
 
 	case NETDEV_CHANGENAME:
@@ -112,32 +142,33 @@ static struct notifier_block brview_device_notifier = {
 	.notifier_call = brview_device_event
 };
 
-/* Delete bridge device */
-void brview_dev_delete(struct net_device *dev, struct list_head *head)
-{
-	struct net_bridge *br = netdev_priv(dev);
-
-	brview_sysfs_delbr(br->dev);
-	unregister_netdevice_queue(br->dev, head);
-}
-
 static int __init brview_init(void)
 {
 	int err;
 
+	brview_root_kobj = kobject_create_and_add("brview_monitor", kernel_kobj);
+	if (!brview_root_kobj) {
+		pr_info("%s: can't add kobject (directory)\n", __func__);
+		err = -ENOMEM;
+		goto out1;
+	}
+
 	err = register_netdevice_notifier(&brview_device_notifier);
 	if (err)
-		return err;
-
+		goto out2;
 
 
 	return 0;
-
+out2:
+	kobject_put(brview_root_kobj);
+out1:
+	return err;
 }
 
 static void __exit brview_deinit(void)
 {
 	unregister_netdevice_notifier(&brview_device_notifier);
+	kobject_put(brview_root_kobj);
 
 }
 
