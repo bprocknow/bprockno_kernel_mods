@@ -16,54 +16,59 @@ EXPORT_SYMBOL_GPL(brview_root_kobj);
 
 static int brview_create(struct net_device *dev)
 {
-	struct brview_bridge *brvb;
-	struct net_bridge_port *p;
+	struct brview_bridge *obj;
 	int err;
 
 	mutex_lock(&brview_bridge_lock);
 
-	brvb = kzalloc(sizeof(*brvb), GFP_KERNEL);
-	if (!brvb) {
-		mutex_unlock(&brview_bridge_lock);
+	list_for_each_entry(obj, &brview_bridge_list, next) {
+		if (obj->dev == dev) {
+			err = -EEXIST;
+			WARN_ONCE(1, "bridge device already exists in the list\n");
+			goto out_unlock;
+		}
+	}
+
+	obj = kzalloc(sizeof(*obj), GFP_KERNEL);
+	if (!obj) {
 		err = -ENOMEM;
-		goto out1;
+		goto out_unlock;
 	}
 
-	p = br_port_get_rtnl(dev);
-	if (!p) {
-		err = -EINVAL;
-		goto out1;
-	}
+	obj->dev = dev;
+	snprintf(obj->ifname, sizeof(obj->ifname), "brview_%s", dev->name);
 
-	// TODO - Initialize brview_bridge brvb
-	brvb->dev = dev;
-	snprintf(brvb->ifname, sizeof(brvb->ifname), "brview_%s", p->sysfs_name);
-	err = brview_sysfs_addbr(brvb);
+	err = brview_sysfs_addbr(brview_root_kobj, obj);
 	if (err) {
-		goto out2;
+		goto out_free;
 	}
 
-	list_add(&brvb->next, &brview_bridge_list);
-	mutex_unlock(&brview_bridge_lock);
+	list_add_tail(&obj->next, &brview_bridge_list);
 
+	mutex_unlock(&brview_bridge_lock);
 	return 0;
 
-out2:
-	kfree(brvb);
-out1:
+out_free:
+	kfree(obj);
+out_unlock:
+	mutex_unlock(&brview_bridge_lock);
 	return err;
 }
 
 static void brview_release(struct net_device *dev)
 {
-	struct brview_bridge *brvb, *tmp;
+	struct brview_bridge *obj, *tmp;
+	pr_info("BlahRemoving net_device: %s\n", dev->name);
 
 	mutex_lock(&brview_bridge_lock);
 
-	list_for_each_entry(tmp, &brview_bridge_list, next) {
+	list_for_each_entry_safe(obj, tmp, &brview_bridge_list, next) {
+		if (obj->dev == dev) {
+			pr_info("Removing net_device: %s\n", dev->name);
 
-		if ((void *)(&tmp->dev) == (void *)dev) {
-			kfree(brvb);
+			list_del_init(&obj->next);
+
+			brview_sysfs_delbr(&obj->kobj);
 			mutex_unlock(&brview_bridge_lock);
 			return;
 		}
@@ -76,8 +81,8 @@ static void brview_release(struct net_device *dev)
 static int brview_device_event(struct notifier_block *unused, unsigned long event, void *ptr)
 {
 	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
-	struct net_bridge_port *p;
-	struct net_bridge *br;
+	//struct net_bridge_port *p;
+	//struct net_bridge *br;
 	int err;
 
 	if (netif_is_bridge_master(dev)) {
@@ -92,11 +97,11 @@ static int brview_device_event(struct notifier_block *unused, unsigned long even
 	}
 
 	/* not a port of a bridge */
-	p = br_port_get_rtnl(dev);
-	if (!p)
-		return NOTIFY_DONE;
+	//p = br_port_get_rtnl(dev);
+	//if (!p)
+	//	return NOTIFY_DONE;
 
-	br = p->br;
+	//br = p->br;
 
 	switch (event) {
 	case NETDEV_CHANGEMTU:
@@ -121,7 +126,8 @@ static int brview_device_event(struct notifier_block *unused, unsigned long even
 		break;
 
 	case NETDEV_UNREGISTER:
-		brview_release(dev);
+		if (netif_is_bridge_master(dev))
+			brview_release(dev);
 		break;
 
 	case NETDEV_CHANGENAME:
@@ -150,29 +156,41 @@ static int __init brview_init(void)
 	if (!brview_root_kobj) {
 		pr_info("%s: can't add kobject (directory)\n", __func__);
 		err = -ENOMEM;
-		goto out1;
+		goto out_ret;
 	}
 
 	err = register_netdevice_notifier(&brview_device_notifier);
-	if (err)
-		goto out2;
+	if (err) {
+		pr_err("brview: register_netdevice_notifier failed %d\n", err);
+		goto out_free;
+	}
 
 
 	return 0;
-out2:
+out_free:
 	kobject_put(brview_root_kobj);
-out1:
+out_ret:
 	return err;
 }
 
 static void __exit brview_deinit(void)
 {
+	struct brview_bridge *obj;
 	unregister_netdevice_notifier(&brview_device_notifier);
-	kobject_put(brview_root_kobj);
 
+	mutex_lock(&brview_bridge_lock);
+
+	list_for_each_entry(obj, &brview_bridge_list, next) {
+		brview_sysfs_delbr(&obj->kobj);
+	}
+
+	mutex_unlock(&brview_bridge_lock);
+
+	kobject_put(brview_root_kobj);
 }
 
-module_init(brview_init)
-module_exit(brview_deinit)
+module_init(brview_init);
+module_exit(brview_deinit);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("bridge probe module");
+

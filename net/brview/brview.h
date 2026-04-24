@@ -9,11 +9,10 @@
 extern struct kobject *brview_root_kobj;
 
 struct brview_bridge {
-	struct kobject *kobj;
+	struct kobject kobj;
 	struct list_head next;
 	char ifname[IFNAMSIZ];
 
-	/* Tracked bridge object associated */
 	struct net_device *dev;
 };
 
@@ -21,11 +20,11 @@ struct brview_bridge {
 void brview_dev_delete(struct net_device *dev, struct list_head *head);
 
 #ifdef CONFIG_SYSFS
-int brview_sysfs_addbr(struct brview_bridge *dev);
-void brview_sysfs_delbr(struct brview_bridge *dev);
+int brview_sysfs_addbr(struct kobject *parent, struct brview_bridge *dev);
+void brview_sysfs_delbr(struct kobject *kobj);
 #else
-int brview_sysfs_addbr(struct brview_bridge *dev) { return 0; }
-void brview_sysfs_delbr(struct brview_bridge *dev) { return; }
+int brview_sysfs_addbr(struct kobject *parent, struct brview_bridge *dev) { return 0; }
+void brview_sysfs_delbr(struct kobject *kobj) { return; }
 #endif /* CONFIG_SYSFS */
 
 #endif /* _BRVIEW_H */
